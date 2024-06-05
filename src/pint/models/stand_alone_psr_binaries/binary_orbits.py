@@ -25,7 +25,7 @@ class Orbit:
     def orbit_phase(self):
         """Orbital phase (between zero and two pi)."""
         orbits = self.orbits()
-        norbits = np.array(np.floor(orbits), dtype=int)
+        norbits = np.array(np.floor(orbits), dtype=np.compat.long)
         return (orbits - norbits) * 2 * np.pi * u.rad
 
     def pbprime(self):
@@ -237,3 +237,238 @@ class OrbitFBX(Orbit):
             if re.match(r"FB\d+", par) is not None
             else np.zeros(len(self.tt0)) * u.second / par_obj.unit
         )
+
+
+class OrbitWaves(Orbit):
+    """Orbit with orbital phase variations described by a Fourier series"""
+
+    def __init__(
+        self,
+        parent,
+        orbit_params=[
+            "PB",
+            "TASC",
+            "ORBWAVE_OM",
+            "ORBWAVE_EPOCH",
+            "ORBWAVEC0",
+            "ORBWAVES0",
+        ],
+    ):
+        super().__init__("orbitWaves", parent, orbit_params)
+
+        Cindices = set()
+        Sindices = set()
+
+        nc = 0
+        ns = 0
+        for k in self.binary_params:
+            if re.match(r"ORBWAVEC\d+", k) is not None and k not in self.orbit_params:
+                self.orbit_params += [k]
+                Cindices.add(int(k[8:]))
+                nc += 1
+            if re.match(r"ORBWAVES\d+", k) is not None and k not in self.orbit_params:
+                self.orbit_params += [k]
+                Sindices.add(int(k[8:]))
+                ns += 1
+
+        if Cindices != set(range(len(Cindices))) or Sindices != set(
+            range(len(Sindices))
+        ):
+            raise ValueError(
+                f"Orbwave Indices must be 0 up to some number k without gaps "
+                f"but are {indices}."
+            )
+
+        if nc != ns:
+            raise ValueError(
+                f"Must have equal number of sine/cosine ORBWAVE pairs "
+                f"but have {ns} and {nc}."
+            )
+
+        self.nwaves = ns
+
+    def _ORBWAVEs(self):
+
+        ii = 0
+        while f"ORBWAVEC{ii}" in self.orbit_params:
+            ii += 1
+        self.nwaves = ii
+
+        ORBWAVEs = np.zeros((self.nwaves, 2)) * u.Unit("")
+
+        for ii in range(self.nwaves):
+            ORBWAVEs[ii, 0] = getattr(self, f"ORBWAVEC{ii}")
+            ORBWAVEs[ii, 1] = getattr(self, f"ORBWAVES{ii}")
+
+        return ORBWAVEs
+
+    def _tw(self):
+
+        t = self.t
+        if not hasattr(self.t, "unit") or self.t.unit is None:
+            t = self.t * u.day
+
+        tw = t - self.ORBWAVE_EPOCH.value * u.d
+        return tw
+
+    def _deltaPhi(self):
+
+        tw = self._tw()
+        waveamps = self._ORBWAVEs()
+        OM = self.ORBWAVE_OM.to("radian/second")
+
+        nh = np.arange(self.nwaves) + 1
+        Cwaves = waveamps[:, 0, None] * np.cos(OM * nh[:, None] * tw[None, :])
+        Swaves = waveamps[:, 1, None] * np.sin(OM * nh[:, None] * tw[None, :])
+
+        delta_Phi = np.sum(Cwaves + Swaves, axis=0)
+
+        return delta_Phi
+
+    def _d_deltaPhi_dt(self):
+
+        tw = self._tw()
+        waveamps = self._ORBWAVEs()
+        OM = self.ORBWAVE_OM.to("radian/second")
+
+        nh = np.arange(self.nwaves) + 1
+        Cwaves = (
+            -OM
+            * nh[:, None]
+            * waveamps[:, 0, None]
+            * np.sin(OM * nh[:, None] * tw[None, :])
+        )
+        Swaves = (
+            OM
+            * nh[:, None]
+            * waveamps[:, 1, None]
+            * np.cos(OM * nh[:, None] * tw[None, :])
+        )
+
+        d_deltaPhi_dt = np.sum(Cwaves + Swaves, axis=0)
+
+        return d_deltaPhi_dt.to(u.Unit("1/s"), equivalencies=u.dimensionless_angles())
+
+    def _d2_deltaPhi_dt2(self):
+
+        tw = self._tw()
+        waveamps = self._ORBWAVEs()
+        OM = self.ORBWAVE_OM.to("radian/second")
+
+        nh = np.arange(self.nwaves) + 1
+        Cwaves = (
+            -((OM * nh[:, None]) ** 2)
+            * waveamps[:, 0, None]
+            * np.cos(OM * nh[:, None] * tw[None, :])
+        )
+        Swaves = (
+            -((OM * nh[:, None]) ** 2)
+            * waveamps[:, 1, None]
+            * np.sin(OM * nh[:, None] * tw[None, :])
+        )
+
+        d2_deltaPhi_dt2 = np.sum(Cwaves + Swaves, axis=0)
+
+        return d2_deltaPhi_dt2.to(
+            u.Unit("1/s^2"), equivalencies=u.dimensionless_angles()
+        )
+
+    def orbits(self):
+        """Orbital phase (number of orbits since TASC)."""
+        PB = self.PB.to("second")
+        orbits = self.tt0 / PB
+
+        dphi = self._deltaPhi()
+
+        orbits += dphi
+        return orbits.decompose()
+
+    def pbprime(self):
+        """Instantaneous binary period as a function of time."""
+        PB = self.PB.to("second")
+        FB0 = 1.0 / PB
+
+        FB0_shift = self._d_deltaPhi_dt()
+
+        return 1.0 / (FB0 + FB0_shift).decompose()
+
+    def pbdot_orbit(self):
+        """Reported value of PBDOT."""
+        FB1 = self._d2_deltaPhi_dt2()
+
+        return -(self.pbprime() ** 2) * FB1
+
+    def d_orbits_d_TASC(self):
+
+        PB = self.PB.to("second")
+        return -(1 / PB) * 2 * np.pi * u.rad
+
+    def d_orbits_d_PB(self):
+
+        PB = self.PB.to("second")
+        return -(self.tt0 / PB**2).decompose() * 2 * np.pi * u.rad
+
+    def d_orbits_d_orbwave(self, par):
+
+        tw = self._tw()
+        WOM = self.ORBWAVE_OM.to("radian/second")
+        nh = int(par[8:]) + 1
+
+        return (
+            (np.cos(WOM * nh * tw) if par[7] == "C" else np.sin(WOM * nh * tw))
+            * 2
+            * np.pi
+            * u.rad
+        )
+
+    def d_pbprime_d_PB(self):
+
+        PB = self.PB.to("second")
+        FB0 = 1.0 / PB
+
+        FB0_shift = self._d_deltaPhi_dt()
+
+        FB0_prime = FB0 + FB0_shift
+
+        return (1.0 / ((FB0_prime * PB) ** 2)).decompose()
+
+    def d_pbprime_d_orbwave(self, par):
+
+        tw = self._tw()
+        WOM = self.ORBWAVE_OM.to("radian/second")
+        PB = self.PB.to("second")
+        FB0 = 1.0 / PB
+        FB0_shift = self._d_deltaPhi_dt()
+
+        FB0_prime = FB0 + FB0_shift
+
+        nh = int(par[8:]) + 1
+        if par[7] == "C":
+            d_deltaFB0_d_orbwave = -WOM * nh * np.sin(WOM * nh * tw)
+        else:
+            d_deltaFB0_d_orbwave = WOM * nh * np.cos(WOM * nh * tw)
+
+        return (-1.0 / FB0_prime**2 * d_deltaFB0_d_orbwave).to(
+            "d", equivalencies=u.dimensionless_angles()
+        )
+
+    def d_orbits_d_par(self, par):
+
+        return (
+            self.d_orbits_d_orbwave(par)
+            if re.match(r"ORBWAVE[CS]\d+", par) is not None
+            else super().d_orbits_d_par(par)
+        )
+
+    def d_pbprime_d_par(self, par):
+        par_obj = getattr(self, par)
+
+        if re.match(r"ORBWAVE[CS]\d+", par) is not None:
+            return self.d_pbprime_d_orbwave(par)
+
+        elif par == "PB":
+            return self.d_pbprime_d_PB()
+
+        # TASC, or other parameters, don't affect PB prime
+        else:
+            return np.zeros(len(self.tt0)) * u.second / par_obj.unit
