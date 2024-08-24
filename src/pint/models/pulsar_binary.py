@@ -302,12 +302,23 @@ class PulsarBinary(DelayComponent):
                 )
                 ii += 1
 
-            self.binary_instance.orbits_cls = bo.OrbitWaves(
-                self.binary_instance,
-                ["PB", "TASC", "ORBWAVE_OM", "ORBWAVE_EPOCH"]
-                + list(ORBWAVES.keys())
-                + list(ORBWAVEC.keys()),
-            )
+            using_FBX = any(v is not None for v in FBXs.values())
+            if using_FBX:
+                fbx = sorted(list(FBXs.keys()))
+                if len(fbx) > 2:
+                    raise ValueError('Only FB0/FB1 are supported.')
+                if (len(fbx) == 2) and  (fbx[1] != 'FB1'):
+                        raise ValueError('Only FB0/FB1 are supported.')
+                orbit_params = fbx + ["TASC", "ORBWAVE_OM", "ORBWAVE_EPOCH"] + list(ORBWAVES.keys()) + list(ORBWAVEC.keys())
+                self.binary_instance.orbits_cls = bo.OrbitWavesFBX(
+                    self.binary_instance,orbit_params)
+            else:
+                self.binary_instance.orbits_cls = bo.OrbitWaves(
+                    self.binary_instance,
+                    ["PB", "TASC", "ORBWAVE_OM", "ORBWAVE_EPOCH"]
+                    + list(ORBWAVES.keys())
+                    + list(ORBWAVEC.keys()),
+                )
 
         # Note: if we are happy to use these to show alternate parameterizations then this can be uncommented
         # else:

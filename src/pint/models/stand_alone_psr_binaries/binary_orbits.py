@@ -195,6 +195,7 @@ class OrbitFBX(Orbit):
         orbit_freq_dot = taylor_horner_deriv(self.tt0, self._FBXs(), 2)
         return -(self.pbprime() ** 2) * orbit_freq_dot
 
+    # TODO -- shouldn't there be a TASC contribution here?
     def d_orbits_d_par(self, par):
         return (
             self.d_orbits_d_FBX(par)
@@ -254,7 +255,9 @@ class OrbitWaves(Orbit):
             "ORBWAVES0",
         ],
     ):
-        super().__init__("orbitWaves", parent, orbit_params)
+        label = self.__class__.__name__
+        label = label[0].lower() + label[1:]
+        super().__init__(label, parent, orbit_params)
 
         Cindices = set()
         Sindices = set()
@@ -262,12 +265,14 @@ class OrbitWaves(Orbit):
         nc = 0
         ns = 0
         for k in self.binary_params:
-            if re.match(r"ORBWAVEC\d+", k) is not None and k not in self.orbit_params:
-                self.orbit_params += [k]
+            if (re.match(r"ORBWAVEC\d+", k) is not None) and (k not in self.orbit_params):
+                print(k)
+                self.orbit_params.append(k)
                 Cindices.add(int(k[8:]))
                 nc += 1
-            if re.match(r"ORBWAVES\d+", k) is not None and k not in self.orbit_params:
-                self.orbit_params += [k]
+            if (re.match(r"ORBWAVES\d+", k) is not None) and (k not in self.orbit_params):
+                print(k)
+                self.orbit_params.append(k)
                 Sindices.add(int(k[8:]))
                 ns += 1
 
@@ -466,9 +471,95 @@ class OrbitWaves(Orbit):
         if re.match(r"ORBWAVE[CS]\d+", par) is not None:
             return self.d_pbprime_d_orbwave(par)
 
-        elif par == "PB":
-            return self.d_pbprime_d_PB()
+        return super().d_pbprime_d_par(par)
+
+        #elif par == "PB":
+            #return self.d_pbprime_d_PB()
 
         # TASC, or other parameters, don't affect PB prime
+        #else:
+            #return np.zeros(len(self.tt0)) * u.second / par_obj.unit
+
+class OrbitWavesFBX(OrbitWaves):
+    """Orbit with orbital phase variations described by a Fourier series"""
+
+    def __init__(
+        self,
+        parent,
+        orbit_params=[
+            "FB0",
+            "TASC",
+            "ORBWAVE_OM",
+            "ORBWAVE_EPOCH",
+            "ORBWAVEC0",
+            "ORBWAVES0",
+        ]
+    ):
+        if not hasattr(parent,'FB1'):
+            parent.add_param(floatParameter(name="FB1",units=u.Hz**2,long_double=True,value=0))
+            parent.binary_instance.add_binary_params('FB1',parent.FB1)
+            orbit_params += ['FB1']
+        super().__init__(parent, orbit_params)
+        # TODO -- sanity check to make sure we have an FB1 set to 0 if need be
+
+    def orbits(self):
+        """Orbital phase (number of orbits since TASC)."""
+        tt = self.tt0
+        orbits = self.FB0*tt * (1 + (0.5*self.FB1/self.FB0)*tt)
+        orbits += self._deltaPhi()
+        return orbits.decompose()
+
+    def pbprime(self):
+        """Instantaneous binary period as a function of time."""
+
+        orbit_freq = self.FB0 + self.FB1*self.tt0
+        orbit_freq += self._d_deltaPhi_dt()
+        return 1.0 / orbit_freq.decompose()
+
+    def pbdot_orbit(self):
+        """Reported value of PBDOT."""
+        orbit_freq_dot = self._d2_deltaPhi_dt2() + self.FB1
+        print('pbdot_orbit')
+        return -(self.pbprime() ** 2) * orbit_freq_dot
+
+    def d_orbits_d_TASC(self):
+        print('d_orbits_d_TASC')
+        return -self.FB0.to("Hz") * 2 * np.pi * u.rad
+
+    def d_orbits_d_FB0(self):
+        print('d_orbits_d_FB0')
+        return self.tt0.decompose() * (2 * np.pi * u.rad)
+
+    def d_orbits_d_FB1(self):
+        print('d_orbits_d_FB1')
+        return (0.5*self.tt0**2).decompose() * (2 * np.pi * u.rad)
+
+    # TODO -- make this the parent implementation
+    def d_pbprime_d_orbwave(self, par):
+        print('d_pbprime_d_orbwave')
+
+        tw = self._tw()
+        WOM = self.ORBWAVE_OM.to("radian/second")
+
+        nh = int(par[8:]) + 1
+        if par[7] == "C":
+            d_deltaFB0_d_orbwave = -WOM * nh * np.sin(WOM * nh * tw)
         else:
-            return np.zeros(len(self.tt0)) * u.second / par_obj.unit
+            d_deltaFB0_d_orbwave = WOM * nh * np.cos(WOM * nh * tw)
+
+        return (-self.pbprime()**2 * d_deltaFB0_d_orbwave).to(
+            "d", equivalencies=u.dimensionless_angles()
+        )
+
+    def d_pbprime_d_FB0(self):
+        print('d_pbprime_d_FB0')
+        return -1*self.pbprime()**2
+
+    def d_pbprime_d_FB1(self):
+        print('d_pbprime_d_FB1')
+        return -self.tt0*self.pbprime()**2
+
+    # NB -- added this to base implementation
+    def d_pbprime_d_TASC(self):
+        print('d_pbprime_d_TASC')
+        return self.FB1*self.pbprime()**2
